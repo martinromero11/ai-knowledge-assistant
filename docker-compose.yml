@@ -1,0 +1,29 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16   # PostgreSQL 16 with the pgvector extension
+    environment:
+      POSTGRES_USER: knowledge
+      POSTGRES_PASSWORD: knowledge
+      POSTGRES_DB: knowledge
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowledge"]
+      interval: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://knowledge:knowledge@db:5432/knowledge
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

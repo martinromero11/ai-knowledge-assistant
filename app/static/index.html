@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Assistant</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --text: #1c2230; --muted: #6b7280; --line: #e2e5ea;
+    --accent: #2f5bd3; --accent-soft: #e8eefc; --warn: #a15c00; --warn-soft: #fff4e0; --danger: #c62828;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
+  .app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+  @media (max-width: 800px) { .app { grid-template-columns: 1fr; height: auto; } aside { max-height: none; } }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+  h1 { font-size: 16px; margin: 0 0 14px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 8px; }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 6px 10px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .6; cursor: default; }
+  .upload { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
+  .upload input { font-size: 12px; width: 100%; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; }
+  .item:hover { background: var(--bg); }
+  .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item.active { background: var(--accent-soft); }
+  .item.convo { cursor: pointer; }
+  .x { border: 0; background: none; color: var(--muted); padding: 2px 6px; }
+  .x:hover { color: var(--danger); }
+  main { display: flex; flex-direction: column; min-height: 0; }
+  .thread { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 760px; padding: 12px 14px; border-radius: 10px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
+  .cite { display: inline-block; min-width: 18px; padding: 0 5px; margin: 0 1px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700; text-align: center; vertical-align: 1px; }
+  .note { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 12px; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .src { margin-top: 8px; padding: 8px; border-left: 3px solid var(--line); background: var(--bg); border-radius: 0 6px 6px 0; font-size: 13px; }
+  .src.cited { border-left-color: var(--accent); }
+  .src .meta { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 24px; display: flex; gap: 8px; }
+  .composer textarea { flex: 1; resize: none; border: 1px solid var(--line); border-radius: 8px; padding: 10px; height: 46px; }
+  .empty { margin: auto; text-align: center; color: var(--muted); max-width: 420px; }
+  .empty b { color: var(--text); }
+  .error { color: var(--danger); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>Knowledge Assistant</h1>
+
+    <h2>Documents</h2>
+    <form class="upload" id="upload">
+      <input type="file" id="file" accept=".txt,.md,.pdf" required>
+      <button class="primary" id="upload-btn">Upload</button>
+      <div class="muted">.txt, .md, or .pdf</div>
+      <div class="error" id="upload-err"></div>
+    </form>
+    <div id="docs"></div>
+
+    <h2>Conversations</h2>
+    <button id="new-chat" style="width:100%">+ New conversation</button>
+    <div id="convos" style="margin-top:8px"></div>
+  </aside>
+
+  <main>
+    <div class="thread" id="thread"></div>
+    <form class="composer" id="composer">
+      <textarea id="question" placeholder="Ask a question about your documents…" required></textarea>
+      <button class="primary" id="send">Ask</button>
+    </form>
+  </main>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let currentConvo = null;
+let embeddingsOn = false;
+const MATCH_LABEL = { keyword: "keyword match", semantic: "meaning match" };
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  if (res.status === 204) return null;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error?.message || res.statusText);
+  return body;
+}
+
+function format(text) {
+  return esc(text)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[(\d+)\]/g, '<span class="cite">$1</span>')
+    .replace(/\n/g, "<br>");
+}
+
+// ---------- documents ----------
+async function loadDocs() {
+  const docs = await api("/documents");
+  $("#docs").innerHTML = docs.length ? docs.map((d) => `
+    <div class="item">
+      <span class="name" title="${esc(d.filename)}">${esc(d.filename)}</span>
+      <span class="muted" title="${d.embedding_model ? "Embedded with " + esc(d.embedding_model) : "No embeddings: keyword search only"}">${d.chunk_count} parts${embeddingsOn && !d.embedding_model ? " · keyword only" : ""}</span>
+      <button class="x" data-del-doc="${d.id}" title="Delete">✕</button>
+    </div>`).join("") : `<div class="muted" style="padding:6px 8px">No documents yet.</div>`;
+  document.querySelectorAll("[data-del-doc]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Delete this document?")) return;
+    await api(`/documents/${b.dataset.delDoc}`, { method: "DELETE" });
+    loadDocs();
+  });
+}
+
+$("#upload").onsubmit = async (e) => {
+  e.preventDefault();
+  const file = $("#file").files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  $("#upload-btn").disabled = true;
+  $("#upload-err").textContent = "";
+  try {
+    await api("/documents", { method: "POST", body: form });
+    $("#file").value = "";
+    loadDocs();
+  } catch (err) {
+    $("#upload-err").textContent = err.message;
+  } finally {
+    $("#upload-btn").disabled = false;
+  }
+};
+
+// ---------- conversations ----------
+async function loadConvos() {
+  const convos = await api("/conversations");
+  $("#convos").innerHTML = convos.map((c) => `
+    <div class="item convo ${c.id === currentConvo ? "active" : ""}" data-id="${c.id}">
+      <span class="name" title="${esc(c.title)}">${esc(c.title)}</span>
+      <button class="x" data-del-convo="${c.id}" title="Delete">✕</button>
+    </div>`).join("");
+  document.querySelectorAll(".convo").forEach((el) => el.onclick = () => openConvo(+el.dataset.id));
+  document.querySelectorAll("[data-del-convo]").forEach((b) => b.onclick = async (e) => {
+    e.stopPropagation();
+    await api(`/conversations/${b.dataset.delConvo}`, { method: "DELETE" });
+    if (+b.dataset.delConvo === currentConvo) newChat();
+    loadConvos();
+  });
+}
+
+function renderMessage(m) {
+  if (m.role === "user") return `<div class="msg user">${format(m.content)}</div>`;
+  const note = m.mode === "retrieval_only"
+    ? `<div class="note">AI answer unavailable (${esc(m.error || "unknown error")}). Showing retrieved passages.</div>` : "";
+  const sources = m.sources.length ? `
+    <details>
+      <summary>${m.sources.length} source passage${m.sources.length > 1 ? "s" : ""} retrieved${m.search_mode ? ` with ${m.search_mode} search` : ""}</summary>
+      ${m.sources.map((s) => `
+        <div class="src ${s.cited ? "cited" : ""}">
+          <div class="meta"><span class="cite">${s.n}</span> ${esc(s.filename)} · part ${s.position + 1} · ${(s.matched_by || []).map((m) => MATCH_LABEL[m] || m).join(" + ")} · score ${s.score}${s.cited ? " · cited" : ""}</div>
+          ${esc(s.excerpt)}
+        </div>`).join("")}
+    </details>` : "";
+  return `<div class="msg assistant">${format(m.content)}${note}${sources}</div>`;
+}
+
+function showEmpty() {
+  $("#thread").innerHTML = `<div class="empty"><p><b>Ask anything about your documents.</b></p>
+    <p>Answers are written only from the passages found in what you've uploaded, with numbered citations you can expand to check.</p></div>`;
+}
+
+async function openConvo(id) {
+  currentConvo = id;
+  const c = await api(`/conversations/${id}`);
+  $("#thread").innerHTML = c.messages.length ? c.messages.map(renderMessage).join("") : "";
+  if (!c.messages.length) showEmpty();
+  $("#thread").scrollTop = $("#thread").scrollHeight;
+  loadConvos();
+}
+
+function newChat() {
+  currentConvo = null;
+  showEmpty();
+  loadConvos();
+  $("#question").focus();
+}
+
+$("#new-chat").onclick = newChat;
+
+$("#composer").onsubmit = async (e) => {
+  e.preventDefault();
+  const question = $("#question").value.trim();
+  if (!question) return;
+  if (!currentConvo) $("#thread").innerHTML = "";
+  $("#thread").insertAdjacentHTML("beforeend",
+    renderMessage({ role: "user", content: question }) +
+    `<div class="msg assistant muted" id="pending">Searching your documents…</div>`);
+  $("#thread").scrollTop = $("#thread").scrollHeight;
+  $("#question").value = "";
+  $("#send").disabled = true;
+  try {
+    const res = await api("/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, conversation_id: currentConvo }),
+    });
+    currentConvo = res.conversation_id;
+    $("#pending").outerHTML = renderMessage(res.answer);
+    loadConvos();
+  } catch (err) {
+    $("#pending").outerHTML = `<div class="msg assistant error">${esc(err.message)}</div>`;
+  } finally {
+    $("#send").disabled = false;
+    $("#thread").scrollTop = $("#thread").scrollHeight;
+  }
+};
+
+$("#question").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); }
+});
+
+api("/health").then((h) => { embeddingsOn = h.semantic_search !== "disabled"; loadDocs(); }).catch(loadDocs);
+loadConvos();
+showEmpty();
+</script>
+</body>
+</html>
